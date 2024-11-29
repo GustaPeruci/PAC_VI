@@ -1,44 +1,32 @@
 import cv2
-import json
-import os
 import numpy as np
-import requests
+import paho.mqtt.client as mqtt
 import time
+from mtcnn.mtcnn import MTCNN
 
-# Configuração do servidor Flask
-FLASK_URL = "http://127.0.0.1:5000/api/receber_dados"
+# Configuração MQTT
+BROKER_ADDRESS = "localhost"  # Endereço do broker MQTT (use 'localhost' para rodar localmente)
+MQTT_TOPIC = "iot/passenger_count"
 
 # Caminhos de arquivos
-video_file_path = "C:\\Users\\Gustavo\\Documents\\Projetos\\PAC_VI\\video\\video_canarinho_curto.mp4"
-local_data_file = "passenger_data.json"
+video_file_path = "C:\\Users\\Gustavo\\Documents\\Projetos\\PAC_VI\\videos\\video_canarinho_curto.mp4"
 
-# Haar Cascade para detecção de rostos
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+# Inicializando o detector MTCNN para detecção de rostos
+detector = MTCNN()
 
-# Verificar se o modelo foi carregado
-if face_cascade.empty():
-    print("Erro: Não foi possível carregar o modelo 'haarcascade_frontalface_default.xml'.")
-    exit()
-
-# Limites e parâmetros de detecção
-min_face_area = 4000
+# Variáveis para controle de detecção e contagem de passageiros
+passenger_count = 0
 entry_zone_top = 0
 entry_zone_bottom = 200
+min_face_area = 4000  # Limite de tamanho do rosto para considerar como válido
 
-# Variável de contagem de passageiros
-passenger_count = 0
+# Configuração do cliente MQTT
+mqtt_client = mqtt.Client()
+mqtt_client.connect(BROKER_ADDRESS)
 
-# Função para enviar dados ao servidor Flask
-def send_data_to_flask(count):
-    data = {"passenger_count": count}
-    try:
-        response = requests.post(FLASK_URL, json=data)
-        if response.status_code == 200:
-            print(f"Dados enviados com sucesso: {data}")
-        else:
-            print(f"Erro ao enviar dados: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        print(f"Erro na requisição: {e}")
+# Função para reduzir a taxa de quadros e tornar o sistema mais lento
+def reduce_frame_rate():
+    time.sleep(0.5)  # Atraso de 0.5 segundos entre os quadros para diminuir o FPS
 
 # Função principal para processar o vídeo
 def process_video(video_path):
@@ -54,14 +42,33 @@ def process_video(video_path):
         if not ret:
             break
 
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        # Reduzir a taxa de quadros para tornar o sistema mais lento
+        reduce_frame_rate()
 
-        for (x, y, w, h) in faces:
+        # Detecção de rostos com MTCNN
+        result = detector.detect_faces(frame)
+
+        # Lista para armazenar rostos detectados no quadro atual
+        current_faces = []
+
+        for face in result:
+            x, y, w, h = face['box']
+            # Verifica se a área do rosto é maior que o limite mínimo
             if w * h > min_face_area and entry_zone_top <= y <= entry_zone_bottom:
-                passenger_count += 1
-                send_data_to_flask(passenger_count)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                # Validando que realmente é um rosto humano, baseado na probabilidade de cada face
+                if face['confidence'] > 0.9:  # Considera rostos com alta confiança
+                    # Adiciona à lista de rostos detectados
+                    current_faces.append((x, y, w, h))
+                    passenger_count += 1
+                    # Publica a contagem de passageiros no tópico MQTT
+                    mqtt_client.publish(MQTT_TOPIC, str(passenger_count))
+                    print(f"Contagem de passageiros enviada via MQTT: {passenger_count}")
+                else:
+                    print("Detecção de objeto não confiável, ignorado.")
+
+        # Exibe os rostos detectados na imagem
+        for (x, y, w, h) in current_faces:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
         cv2.imshow("Detecção de Passageiros", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -72,4 +79,5 @@ def process_video(video_path):
 
 # Fluxo principal
 if __name__ == "__main__":
+    print("Simulador IoT iniciado. Enviando dados via MQTT...")
     process_video(video_file_path)
